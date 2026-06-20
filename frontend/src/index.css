@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  background-color: #f7f8fa;
+  color: #1d2129;
+}
+
+.btn-primary {
+  @apply bg-primary text-white px-6 py-2.5 rounded-lg font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-secondary {
+  @apply bg-white border border-gray-300 text-gray-600 px-6 py-2.5 rounded-lg font-medium hover:bg-gray-50 transition-colors;
+}
+
+.btn-danger {
+  @apply bg-danger text-white px-6 py-2.5 rounded-lg font-medium hover:bg-danger/90 transition-colors;
+}
+
+.card {
+  @apply bg-white rounded-xl shadow-sm border border-gray-100;
+}
+
+.input-field {
+  @apply w-full px-4 py-2.5 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all;
+}
+
+.label {
+  @apply block text-sm font-medium text-gray-600 mb-1.5;
+}
+
+.badge {
+  @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+}
+
+.status-pending {
+  @apply bg-warning/10 text-warning;
+}
+
+.status-preparing {
+  @apply bg-primary/10 text-primary;
+}
+
+.status-assembling {
+  @apply bg-primary/10 text-primary;
+}
+
+.status-debugging {
+  @apply bg-secondary/10 text-secondary;
+}
+
+.status-ready {
+  @apply bg-success/10 text-success;
+}
+
+.status-delivered {
+  @apply bg-gray-100 text-gray-500;
+}

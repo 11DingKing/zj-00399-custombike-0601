@@ -51,16 +51,59 @@ const getOrdersByStatusAndUseType = db.prepare(
 );
 
 const PART_CATEGORY_MAP = {
-  frame: { idField: "frame_id", nameField: "frame_name", priceField: "frame_price", stockField: "frame_stock", specsField: "frame_specs", brandField: "frame_brand" },
-  wheelset: { idField: "wheelset_id", nameField: "wheelset_name", priceField: "wheelset_price", stockField: "wheelset_stock", specsField: "wheelset_specs", brandField: "wheelset_brand" },
-  drivetrain: { idField: "drivetrain_id", nameField: "drivetrain_name", priceField: "drivetrain_price", stockField: "drivetrain_stock", specsField: "drivetrain_specs", brandField: "drivetrain_brand" },
-  saddle: { idField: "saddle_id", nameField: "saddle_name", priceField: "saddle_price", stockField: "saddle_stock", specsField: "saddle_specs", brandField: "saddle_brand" },
-  handlebar: { idField: "handlebar_id", nameField: "handlebar_name", priceField: "handlebar_price", stockField: "handlebar_stock", specsField: "handlebar_specs", brandField: "handlebar_brand" },
-  smart_accessory: { idField: "smart_accessory_id", nameField: "smart_accessory_name", priceField: "smart_accessory_price", stockField: "smart_accessory_stock", specsField: "smart_accessory_specs", brandField: "smart_accessory_brand" },
+  frame: {
+    idField: "frame_id",
+    nameField: "frame_name",
+    priceField: "frame_price",
+    stockField: "frame_stock",
+    specsField: "frame_specs",
+    brandField: "frame_brand",
+  },
+  wheelset: {
+    idField: "wheelset_id",
+    nameField: "wheelset_name",
+    priceField: "wheelset_price",
+    stockField: "wheelset_stock",
+    specsField: "wheelset_specs",
+    brandField: "wheelset_brand",
+  },
+  drivetrain: {
+    idField: "drivetrain_id",
+    nameField: "drivetrain_name",
+    priceField: "drivetrain_price",
+    stockField: "drivetrain_stock",
+    specsField: "drivetrain_specs",
+    brandField: "drivetrain_brand",
+  },
+  saddle: {
+    idField: "saddle_id",
+    nameField: "saddle_name",
+    priceField: "saddle_price",
+    stockField: "saddle_stock",
+    specsField: "saddle_specs",
+    brandField: "saddle_brand",
+  },
+  handlebar: {
+    idField: "handlebar_id",
+    nameField: "handlebar_name",
+    priceField: "handlebar_price",
+    stockField: "handlebar_stock",
+    specsField: "handlebar_specs",
+    brandField: "handlebar_brand",
+  },
+  smart_accessory: {
+    idField: "smart_accessory_id",
+    nameField: "smart_accessory_name",
+    priceField: "smart_accessory_price",
+    stockField: "smart_accessory_stock",
+    specsField: "smart_accessory_specs",
+    brandField: "smart_accessory_brand",
+  },
 };
 
 function isQuoteExpired(order) {
-  if (!order.quote_generated_at || order.status !== "quote_pending") return false;
+  if (!order.quote_generated_at || order.status !== "quote_pending")
+    return false;
   const validHours = order.quote_valid_hours || 24;
   const genTime = new Date(order.quote_generated_at).getTime();
   const expireTime = genTime + validHours * 60 * 60 * 1000;
@@ -106,6 +149,25 @@ function consumeStockReservations(orderId) {
   ).run(orderId);
 }
 
+function rollbackStockConsumption(orderId) {
+  const consumed = db
+    .prepare(
+      "SELECT * FROM stock_reservations WHERE order_id = ? AND status = 'consumed'",
+    )
+    .all(orderId);
+
+  for (const r of consumed) {
+    db.prepare("UPDATE parts SET stock = stock + ? WHERE id = ?").run(
+      r.quantity,
+      r.part_id,
+    );
+  }
+
+  db.prepare(
+    "UPDATE stock_reservations SET status = 'reserved', consumed_at = NULL WHERE order_id = ? AND status = 'consumed'",
+  ).run(orderId);
+}
+
 function createStockReservations(orderId, partIds) {
   releaseStockReservations(orderId);
   const insert = db.prepare(
@@ -141,8 +203,12 @@ function checkCompatibility(partIds) {
         )
         .get(partIds[i], partIds[j], partIds[j], partIds[i]);
       if (rule && rule.compatible === 0) {
-        const pA = db.prepare("SELECT name FROM parts WHERE id = ?").get(partIds[i]);
-        const pB = db.prepare("SELECT name FROM parts WHERE id = ?").get(partIds[j]);
+        const pA = db
+          .prepare("SELECT name FROM parts WHERE id = ?")
+          .get(partIds[i]);
+        const pB = db
+          .prepare("SELECT name FROM parts WHERE id = ?")
+          .get(partIds[j]);
         issues.push({
           part_a: pA?.name || "未知配件",
           part_b: pB?.name || "未知配件",
@@ -202,10 +268,12 @@ function buildQuoteBreakdown(order) {
 function formatOrder(order) {
   if (!order) return null;
   const parts = [];
+  const partIds = [];
   for (const cat of PART_CATEGORIES) {
     const conf = PART_CATEGORY_MAP[cat.key];
     const partId = order[conf.idField];
     if (partId) {
+      partIds.push(partId);
       parts.push({
         id: partId,
         category: cat.key,
@@ -226,9 +294,7 @@ function formatOrder(order) {
   const minStep = Math.min(...ORDER_STATUSES.map((s) => s.step));
   const maxStep = Math.max(...ORDER_STATUSES.map((s) => s.step));
   const range = maxStep - minStep;
-  const progress = range > 0
-    ? ((statusInfo.step - minStep) / range) * 100
-    : 0;
+  const progress = range > 0 ? ((statusInfo.step - minStep) / range) * 100 : 0;
 
   const createdDate = new Date(order.created_at);
   const estimatedDate = new Date(
@@ -246,10 +312,16 @@ function formatOrder(order) {
 
   const quoteExpired = isQuoteExpired(order);
 
-  const quote =
-    order.quote_generated_at
-      ? buildQuoteBreakdown(order)
-      : null;
+  const quote = order.quote_generated_at ? buildQuoteBreakdown(order) : null;
+
+  const compatibility = checkCompatibility(partIds);
+
+  const consumedCount = db
+    .prepare(
+      "SELECT COUNT(*) as cnt FROM stock_reservations WHERE order_id = ? AND status = 'consumed'",
+    )
+    .get(order.id).cnt;
+  const stockConsumed = consumedCount >= partIds.length && partIds.length >= 3;
 
   return {
     id: order.id,
@@ -289,6 +361,10 @@ function formatOrder(order) {
     quote_valid_hours: order.quote_valid_hours || 24,
     quote_expired: quoteExpired,
     stock_reserved: order.stock_reserved || 0,
+    stock_consumed: stockConsumed,
+    compatibility: compatibility,
+    can_assemble:
+      stockConsumed && compatibility.compatible && partIds.length >= 3,
     quote: quote,
   };
 }
@@ -465,11 +541,13 @@ app.put("/api/orders/:id/configure", (req, res) => {
     .get(orderId);
   if (!existingOrder) return res.status(404).json({ error: "订单不存在" });
 
-  if (existingOrder.status === "preparing" ||
-      existingOrder.status === "assembling" ||
-      existingOrder.status === "debugging" ||
-      existingOrder.status === "ready" ||
-      existingOrder.status === "delivered") {
+  if (
+    existingOrder.status === "preparing" ||
+    existingOrder.status === "assembling" ||
+    existingOrder.status === "debugging" ||
+    existingOrder.status === "ready" ||
+    existingOrder.status === "delivered"
+  ) {
     return res.status(400).json({ error: "订单已进入生产阶段，无法修改配置" });
   }
 
@@ -556,6 +634,15 @@ app.post("/api/orders/:id/generate-quote", (req, res) => {
   const existing = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
   if (!existing) return res.status(404).json({ error: "订单不存在" });
 
+  if (existing.status !== "draft") {
+    return res.status(400).json({
+      error: `只有「草稿报价」状态才能生成报价，当前状态：${
+        ORDER_STATUSES.find((s) => s.key === existing.status)?.label ||
+        existing.status
+      }`,
+    });
+  }
+
   const partIds = [
     existing.frame_id,
     existing.wheelset_id,
@@ -572,7 +659,9 @@ app.post("/api/orders/:id/generate-quote", (req, res) => {
   for (const pid of partIds) {
     if (getEffectiveStock(pid) <= 0) {
       const p = db.prepare("SELECT name FROM parts WHERE id = ?").get(pid);
-      return res.status(400).json({ error: `配件 ${p?.name || "未知"} 库存不足，无法生成报价` });
+      return res
+        .status(400)
+        .json({ error: `配件 ${p?.name || "未知"} 库存不足，无法生成报价` });
     }
   }
 
@@ -603,7 +692,12 @@ app.post("/api/orders/:id/generate-quote", (req, res) => {
   db.prepare(
     `INSERT INTO order_status_logs (order_id, status, operator, remark)
      VALUES (?, ?, ?, ?)`,
-  ).run(orderId, "quote_pending", req.body?.operator || "顾问", "报价生成并提交客户确认");
+  ).run(
+    orderId,
+    "quote_pending",
+    req.body?.operator || "顾问",
+    "报价生成并提交客户确认",
+  );
 
   const updated = getOrderById.get(orderId);
   res.json({
@@ -638,7 +732,9 @@ app.post("/api/orders/:id/confirm-quote", (req, res) => {
   const reservations = getStockReservations(orderId);
   for (const r of reservations) {
     if (getEffectiveStock(r.part_id) < 0) {
-      return res.status(400).json({ error: `配件 ${r.part_name} 库存发生变化，请重新生成报价` });
+      return res
+        .status(400)
+        .json({ error: `配件 ${r.part_name} 库存发生变化，请重新生成报价` });
     }
   }
 
@@ -698,6 +794,58 @@ app.get("/api/orders/:id/reservations", (req, res) => {
   res.json(reservations);
 });
 
+function validateStatusTransition(currentStatus, targetStatus) {
+  const currentInfo = ORDER_STATUSES.find((s) => s.key === currentStatus);
+  const targetInfo = ORDER_STATUSES.find((s) => s.key === targetStatus);
+  if (!currentInfo || !targetInfo)
+    return { valid: false, reason: "无效的状态" };
+
+  if (currentStatus === "delivered") {
+    return { valid: false, reason: "已交付的订单不能修改状态" };
+  }
+
+  const currentStep = currentInfo.step;
+  const targetStep = targetInfo.step;
+  const stepDiff = targetStep - currentStep;
+
+  if (stepDiff === 0) {
+    return { valid: false, reason: "状态未发生变化" };
+  }
+
+  if (stepDiff > 1) {
+    return {
+      valid: false,
+      reason: `不能从「${currentInfo.label}」直接跳转到「${targetInfo.label}」，请按业务顺序逐步推进`,
+    };
+  }
+
+  if (stepDiff < -1) {
+    return {
+      valid: false,
+      reason: `不能从「${currentInfo.label}」回退到「${targetInfo.label}」，只能回退到上一个状态`,
+    };
+  }
+
+  if (targetStatus === "delivered" && currentStatus !== "ready") {
+    return {
+      valid: false,
+      reason: `只有「可取车」状态才能交付，当前状态「${currentInfo.label}」不能直接交付`,
+    };
+  }
+
+  if (
+    ["assembling", "debugging", "ready"].includes(currentStatus) &&
+    ["draft", "quote_pending"].includes(targetStatus)
+  ) {
+    return {
+      valid: false,
+      reason: `生产阶段的订单不能回退到报价阶段`,
+    };
+  }
+
+  return { valid: true };
+}
+
 app.put("/api/orders/:id/status", (req, res) => {
   const { status, operator, remark } = req.body;
   const orderId = req.params.id;
@@ -712,33 +860,125 @@ app.put("/api/orders/:id/status", (req, res) => {
     .get(orderId);
   if (!existingOrder) return res.status(404).json({ error: "订单不存在" });
 
-  if (existingOrder.status === "quote_pending" && status === "preparing") {
-    if (isQuoteExpired(existingOrder)) {
-      releaseStockReservations(orderId);
-      db.prepare(
-        "UPDATE orders SET status = 'draft', quote_generated_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      ).run(orderId);
-      return res.status(400).json({ error: "报价已过期，请重新生成并确认" });
+  const transition = validateStatusTransition(existingOrder.status, status);
+  if (!transition.valid) {
+    return res.status(400).json({ error: transition.reason });
+  }
+
+  const partIds = [
+    existingOrder.frame_id,
+    existingOrder.wheelset_id,
+    existingOrder.drivetrain_id,
+    existingOrder.saddle_id,
+    existingOrder.handlebar_id,
+    existingOrder.smart_accessory_id,
+  ].filter(Boolean);
+
+  if (existingOrder.status === "draft") {
+    if (status === "quote_pending") {
+      return res.status(400).json({
+        error:
+          "请通过「生成报价」接口提交报价（POST /generate-quote），不要直接修改状态",
+      });
     }
-    consumeStockReservations(orderId);
+  }
+
+  if (existingOrder.status === "quote_pending") {
+    if (status === "preparing") {
+      return res.status(400).json({
+        error:
+          "请通过「确认报价」接口确认（POST /confirm-quote），不要直接修改状态",
+      });
+    }
+    if (status === "draft") {
+      return res.status(400).json({
+        error:
+          "请通过「取消报价」接口取消（POST /cancel-quote），不要直接修改状态",
+      });
+    }
+  }
+
+  if (existingOrder.status === "preparing" && status === "assembling") {
+    if (partIds.length < 3) {
+      return res.status(400).json({
+        error: "至少需要配置车架、轮组和传动系统才能开始装配",
+      });
+    }
+
+    const compat = checkCompatibility(partIds);
+    if (!compat.compatible) {
+      return res.status(400).json({
+        error: "存在兼容性冲突，无法进入装配阶段",
+        compatibility_issues: compat.issues,
+      });
+    }
+
+    const consumedReservations = db
+      .prepare(
+        "SELECT COUNT(*) as cnt FROM stock_reservations WHERE order_id = ? AND status = 'consumed'",
+      )
+      .get(orderId).cnt;
+    if (consumedReservations === 0) {
+      return res.status(400).json({
+        error: "库存尚未扣减，请先确认报价完成备料后再进入装配",
+      });
+    }
+
+    const stockIssues = [];
+    for (const pid of partIds) {
+      const part = db.prepare("SELECT * FROM parts WHERE id = ?").get(pid);
+      const consumed = db
+        .prepare(
+          "SELECT COALESCE(SUM(quantity), 0) as qty FROM stock_reservations WHERE order_id = ? AND part_id = ? AND status = 'consumed'",
+        )
+        .get(orderId, pid).qty;
+      if (part && consumed < 1) {
+        stockIssues.push(part.name);
+      }
+    }
+    if (stockIssues.length > 0) {
+      return res.status(400).json({
+        error: `以下配件未完成库存扣减，无法进入装配: ${stockIssues.join(", ")}`,
+      });
+    }
+  }
+
+  if (existingOrder.status === "assembling" && status === "debugging") {
+  }
+
+  if (existingOrder.status === "debugging" && status === "ready") {
+  }
+
+  if (existingOrder.status === "preparing" && status === "quote_pending") {
+    rollbackStockConsumption(orderId);
     db.prepare(
-      "UPDATE orders SET quote_confirmed_at = CURRENT_TIMESTAMP, quote_confirmed_by = ? WHERE id = ?",
-    ).run(operator || "客户", orderId);
+      "UPDATE orders SET quote_confirmed_at = NULL, quote_confirmed_by = NULL, stock_reserved = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).run(orderId);
+  }
+
+  if (existingOrder.status === "quote_pending" && status === "draft") {
+    releaseStockReservations(orderId);
+    db.prepare(
+      "UPDATE orders SET quote_generated_at = NULL, quote_confirmed_at = NULL, quote_confirmed_by = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).run(orderId);
   }
 
   if (
-    (existingOrder.status === "preparing" || existingOrder.status === "quote_pending" || existingOrder.status === "draft") &&
-    (status === "preparing" || status === "assembling")
+    ["assembling", "debugging", "ready"].includes(existingOrder.status) &&
+    ["draft", "quote_pending"].includes(status)
   ) {
-    const partIds = [
-      existingOrder.frame_id,
-      existingOrder.wheelset_id,
-      existingOrder.drivetrain_id,
-      existingOrder.saddle_id,
-      existingOrder.handlebar_id,
-      existingOrder.smart_accessory_id,
-    ].filter(Boolean);
+    return res.status(400).json({
+      error: `生产阶段的订单不能回退到报价阶段`,
+    });
+  }
 
+  if (existingOrder.status === "delivered") {
+    return res.status(400).json({
+      error: "已交付的订单不能修改状态",
+    });
+  }
+
+  if (status === "preparing" && existingOrder.status !== "quote_pending") {
     const stockIssues = [];
     for (const pid of partIds) {
       const eff = getEffectiveStock(pid);
@@ -747,19 +987,11 @@ app.put("/api/orders/:id/status", (req, res) => {
         stockIssues.push(part.name);
       }
     }
-
-    if (stockIssues.length > 0 && existingOrder.stock_reserved !== 1) {
+    if (stockIssues.length > 0) {
       return res
         .status(400)
-        .json({ error: `库存不足，无法开始备料: ${stockIssues.join(", ")}` });
+        .json({ error: `库存不足: ${stockIssues.join(", ")}` });
     }
-  }
-
-  if (
-    (existingOrder.status === "draft" || existingOrder.status === "quote_pending") &&
-    (status === "assembling" || status === "debugging" || status === "ready")
-  ) {
-    return res.status(400).json({ error: "请先确认报价后再推进到生产阶段" });
   }
 
   let deliveredAt = existingOrder.delivered_at;
@@ -843,7 +1075,9 @@ app.get("/api/stats", (req, res) => {
     .get().count;
 
   const reservedCount = db
-    .prepare("SELECT COUNT(*) as count FROM stock_reservations WHERE status = 'reserved'")
+    .prepare(
+      "SELECT COUNT(*) as count FROM stock_reservations WHERE status = 'reserved'",
+    )
     .get().count;
 
   res.json({
@@ -888,7 +1122,8 @@ app.get("/api/recommend-parts", (req, res) => {
       params.push(height, height);
     }
 
-    query += " ORDER BY (stock - COALESCE((SELECT SUM(quantity) FROM stock_reservations WHERE part_id = parts.id AND status = 'reserved'), 0)) > 0 DESC, price ASC LIMIT 3";
+    query +=
+      " ORDER BY (stock - COALESCE((SELECT SUM(quantity) FROM stock_reservations WHERE part_id = parts.id AND status = 'reserved'), 0)) > 0 DESC, price ASC LIMIT 3";
     const raw = db.prepare(query).all(...params);
     recommendations[cat] = raw.map((p) => ({
       ...p,

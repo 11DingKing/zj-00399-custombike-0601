@@ -12,7 +12,13 @@ const statusFlow = [
 ];
 
 const quoteStatuses = ["draft", "quote_pending"];
-const productionStatuses = ["preparing", "assembling", "debugging", "ready", "delivered"];
+const productionStatuses = [
+  "preparing",
+  "assembling",
+  "debugging",
+  "ready",
+  "delivered",
+];
 
 export default function AssemblyBoardPage() {
   const navigate = useNavigate();
@@ -63,17 +69,78 @@ export default function AssemblyBoardPage() {
     return orders.filter((o) => o.status === status);
   };
 
+  const canAdvance = (order) => {
+    const currentIndex = statusFlow.findIndex((s) => s.key === order.status);
+    if (currentIndex >= statusFlow.length - 1) return { ok: false, reason: "" };
+
+    const nextStatus = statusFlow[currentIndex + 1];
+
+    if (order.status === "draft") {
+      return { ok: false, reason: "请前往顾问页面生成报价" };
+    }
+
+    if (order.status === "quote_pending") {
+      if (order.quote_expired) {
+        return { ok: false, reason: "报价已过期，请在顾问页面重新生成" };
+      }
+      return { ok: true };
+    }
+
+    if (order.status === "preparing" && nextStatus.key === "assembling") {
+      if (!order.can_assemble) {
+        const reasons = [];
+        if (!order.compatibility?.compatible) {
+          reasons.push("存在兼容性冲突");
+        }
+        if (!order.stock_consumed) {
+          reasons.push("库存未完成扣减");
+        }
+        const partCount = order.parts?.length || 0;
+        if (partCount < 3) {
+          reasons.push("至少需要配置车架/轮组/传动");
+        }
+        return {
+          ok: false,
+          reason: reasons.length > 0 ? reasons.join("，") : "条件未满足",
+        };
+      }
+      return { ok: true };
+    }
+
+    return { ok: true };
+  };
+
+  const canRollback = (order) => {
+    if (order.status === "draft" || order.status === "delivered") {
+      return { ok: false };
+    }
+    if (
+      ["assembling", "debugging", "ready"].includes(order.status) &&
+      ["quote_pending", "draft"].includes(
+        statusFlow[statusFlow.findIndex((s) => s.key === order.status) - 1]
+          ?.key,
+      )
+    ) {
+      return { ok: false, reason: "生产阶段订单不能回退到报价阶段" };
+    }
+    return { ok: true };
+  };
+
   const handleNextStatus = async (order) => {
+    const check = canAdvance(order);
+    if (!check.ok) {
+      if (check.reason) {
+        alert(`不能推进：${check.reason}`);
+      }
+      return;
+    }
+
     const currentIndex = statusFlow.findIndex((s) => s.key === order.status);
     if (currentIndex >= statusFlow.length - 1) return;
 
     const nextStatus = statusFlow[currentIndex + 1];
 
     if (order.status === "quote_pending") {
-      if (order.quote_expired) {
-        alert("报价已过期，请先在顾问页面处理");
-        return;
-      }
       if (!confirm("客户是否已确认报价？确认后将正式扣减库存并进入备料。"))
         return;
     } else {
@@ -86,12 +153,14 @@ export default function AssemblyBoardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           status: nextStatus.key,
-          operator: order.status === "quote_pending"
-            ? order.customer_name || "客户"
-            : "装配师小李",
-          remark: order.status === "quote_pending"
-            ? "客户确认报价，进入备料"
-            : `推进至${nextStatus.label}`,
+          operator:
+            order.status === "quote_pending"
+              ? order.customer_name || "客户"
+              : "装配师小李",
+          remark:
+            order.status === "quote_pending"
+              ? "客户确认报价，进入备料"
+              : `推进至${nextStatus.label}`,
         }),
       });
       if (res.ok) {
@@ -173,7 +242,9 @@ export default function AssemblyBoardPage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold text-dark mb-1">装配看板</h2>
-          <p className="text-gray-500 text-sm">实时追踪订单装配进度与报价状态</p>
+          <p className="text-gray-500 text-sm">
+            实时追踪订单装配进度与报价状态
+          </p>
         </div>
 
         <div className="flex items-center gap-4 flex-wrap">
@@ -298,9 +369,7 @@ export default function AssemblyBoardPage() {
                   <div className="text-sm font-medium text-gray-800 truncate">
                     {p.name}
                   </div>
-                  <div className="text-xs text-gray-400 mb-2">
-                    {p.category}
-                  </div>
+                  <div className="text-xs text-gray-400 mb-2">{p.category}</div>
                   <div className="flex items-center justify-between text-xs">
                     <span
                       className={
@@ -381,12 +450,11 @@ export default function AssemblyBoardPage() {
                           </span>
                           <div className="flex items-center gap-1">
                             {getStatusBadge(order)}
-                            {order.is_overdue &&
-                              viewMode === "production" && (
-                                <span className="text-xs bg-danger/10 text-danger px-2 py-0.5 rounded-full animate-pulse">
-                                  超期
-                                </span>
-                              )}
+                            {order.is_overdue && viewMode === "production" && (
+                              <span className="text-xs bg-danger/10 text-danger px-2 py-0.5 rounded-full animate-pulse">
+                                超期
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -408,18 +476,15 @@ export default function AssemblyBoardPage() {
                         {quoteStatuses.includes(statusKey) ? (
                           <div className="text-xs text-gray-400 space-y-0.5">
                             {order.status === "draft" && (
-                              <div>
-                                已配置：{order.parts?.length || 0}/6 项
-                              </div>
+                              <div>已配置：{order.parts?.length || 0}/6 项</div>
                             )}
                             {order.status === "quote_pending" && (
                               <>
                                 <div>
                                   报价时间：
-                                  {order.quote_generated_at?.slice(5, 16).replace(
-                                    "T",
-                                    " ",
-                                  ) || "-"}
+                                  {order.quote_generated_at
+                                    ?.slice(5, 16)
+                                    .replace("T", " ") || "-"}
                                 </div>
                                 <div
                                   className={
@@ -464,28 +529,44 @@ export default function AssemblyBoardPage() {
                         )}
 
                         <div className="flex gap-1 mt-3 pt-2 border-t border-gray-50">
-                          {statusKey !== "draft" && statusKey !== "delivered" && (
-                            <button
-                              className="flex-1 py-1 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-50 rounded"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handlePrevStatus(order);
-                              }}
-                            >
-                              ← 回退
-                            </button>
-                          )}
+                          {statusKey !== "draft" &&
+                            statusKey !== "delivered" && (
+                              <button
+                                className={`flex-1 py-1 text-xs rounded ${
+                                  !canRollback(order).ok
+                                    ? "text-gray-300 cursor-not-allowed"
+                                    : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
+                                }`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handlePrevStatus(order);
+                                }}
+                                disabled={!canRollback(order).ok}
+                                title={canRollback(order).reason || ""}
+                              >
+                                ← 回退
+                              </button>
+                            )}
                           {statusKey !== "delivered" && (
                             <button
-                              className="flex-1 py-1 text-xs text-primary hover:bg-primary/5 rounded font-medium"
+                              className={`flex-1 py-1 text-xs rounded font-medium ${
+                                !canAdvance(order).ok
+                                  ? "text-gray-300 cursor-not-allowed bg-gray-50"
+                                  : "text-primary hover:bg-primary/5"
+                              }`}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleNextStatus(order);
                               }}
+                              disabled={!canAdvance(order).ok}
+                              title={canAdvance(order).reason || ""}
                             >
                               {statusKey === "quote_pending"
                                 ? "✅ 确认 →"
-                                : "推进 →"}
+                                : !canAdvance(order).ok
+                                  ? canAdvance(order).reason?.slice(0, 8) +
+                                    "… →"
+                                  : "推进 →"}
                             </button>
                           )}
                         </div>

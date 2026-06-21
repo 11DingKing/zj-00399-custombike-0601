@@ -68,18 +68,63 @@ export default function OrderDetailPage() {
     }
   };
 
+  const canAdvance = () => {
+    const currentIndex = statusFlow.findIndex((s) => s.key === order.status);
+    if (currentIndex >= statusFlow.length - 1) return { ok: false, reason: "" };
+    const nextStatus = statusFlow[currentIndex + 1];
+
+    if (order.status === "draft") {
+      return { ok: false, reason: "请前往顾问页面配置并生成报价" };
+    }
+
+    if (order.status === "quote_pending") {
+      if (order.quote_expired) {
+        return { ok: false, reason: "报价已过期，请在顾问页面重新生成" };
+      }
+      return { ok: true };
+    }
+
+    if (order.status === "preparing" && nextStatus.key === "assembling") {
+      if (!order.can_assemble) {
+        const reasons = [];
+        if (!order.compatibility?.compatible) {
+          reasons.push("存在兼容性冲突");
+        }
+        if (!order.stock_consumed) {
+          reasons.push("库存未完成扣减（未确认报价）");
+        }
+        const partCount = order.parts?.length || 0;
+        if (partCount < 3) {
+          reasons.push("至少需要配置车架/轮组/传动");
+        }
+        return {
+          ok: false,
+          reason: reasons.length > 0 ? reasons.join("；") : "条件未满足",
+        };
+      }
+      return { ok: true };
+    }
+
+    return { ok: true };
+  };
+
   const handleNextStatus = async () => {
+    const check = canAdvance();
+    if (!check.ok) {
+      if (check.reason) {
+        alert(`不能推进：${check.reason}`);
+      }
+      return;
+    }
+
     const currentIndex = statusFlow.findIndex((s) => s.key === order.status);
     if (currentIndex >= statusFlow.length - 1) return;
 
     const nextStatus = statusFlow[currentIndex + 1];
 
     if (order.status === "quote_pending") {
-      if (order.quote_expired) {
-        alert("报价已过期，请先到顾问页面重新生成报价");
+      if (!confirm("客户是否已确认报价？确认后将正式扣减库存并进入备料。"))
         return;
-      }
-      if (!confirm("客户是否已确认报价？确认后将正式扣减库存并进入备料。")) return;
     } else {
       if (!confirm(`确认将订单推进到「${nextStatus.label}」状态？`)) return;
     }
@@ -90,12 +135,14 @@ export default function OrderDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           status: nextStatus.key,
-          operator: order.status === "quote_pending"
-            ? (order.customer_name || "客户")
-            : "装配师小李",
-          remark: order.status === "quote_pending"
-            ? "客户确认报价，进入备料"
-            : `推进至${nextStatus.label}`,
+          operator:
+            order.status === "quote_pending"
+              ? order.customer_name || "客户"
+              : "装配师小李",
+          remark:
+            order.status === "quote_pending"
+              ? "客户确认报价，进入备料"
+              : `推进至${nextStatus.label}`,
         }),
       });
       if (res.ok) {
@@ -125,8 +172,17 @@ export default function OrderDetailPage() {
   }
 
   const currentStep = statusFlow.findIndex((s) => s.key === order.status);
-  const isInProduction = ["preparing", "assembling", "debugging", "ready", "delivered"].includes(order.status);
-  const prodIndex = Math.max(0, productionFlow.findIndex((s) => s.key === order.status));
+  const isInProduction = [
+    "preparing",
+    "assembling",
+    "debugging",
+    "ready",
+    "delivered",
+  ].includes(order.status);
+  const prodIndex = Math.max(
+    0,
+    productionFlow.findIndex((s) => s.key === order.status),
+  );
 
   const getStatusBadgeClass = (status) => {
     switch (status) {
@@ -168,11 +224,12 @@ export default function OrderDetailPage() {
                 {order.status_label}
                 {order.quote_expired && "（已过期）"}
               </span>
-              {order.stock_reserved === 1 && order.status === "quote_pending" && (
-                <span className="badge bg-secondary/10 text-secondary">
-                  🔒 库存已预占
-                </span>
-              )}
+              {order.stock_reserved === 1 &&
+                order.status === "quote_pending" && (
+                  <span className="badge bg-secondary/10 text-secondary">
+                    🔒 库存已预占
+                  </span>
+                )}
               {order.is_overdue && isInProduction && (
                 <span className="badge bg-danger/10 text-danger animate-pulse">
                   ⚠️ 已超期
@@ -259,9 +316,7 @@ export default function OrderDetailPage() {
               <div
                 className="absolute top-0 left-0 h-full bg-success rounded-full transition-all"
                 style={{
-                  width: `${
-                    (prodIndex / (productionFlow.length - 1)) * 100
-                  }%`,
+                  width: `${(prodIndex / (productionFlow.length - 1)) * 100}%`,
                 }}
               />
             </div>
@@ -489,8 +544,8 @@ export default function OrderDetailPage() {
                       {r.part_name}
                     </div>
                     <div className="text-xs text-gray-400">
-                      {partCategories.find((c) => c.key === r.category)?.label} ·
-                      数量 {r.quantity}
+                      {partCategories.find((c) => c.key === r.category)?.label}{" "}
+                      · 数量 {r.quantity}
                     </div>
                   </div>
                 </div>
@@ -543,29 +598,78 @@ export default function OrderDetailPage() {
       </div>
 
       {order.status !== "delivered" && (
-        <div className="flex items-center justify-between">
-          {order.status === "draft" && (
-            <button
-              className="btn-secondary"
-              onClick={() => navigate(`/consultant/${order.id}`)}
-            >
-              🛠️ 前往配置
-            </button>
+        <div className="space-y-3">
+          {order.status === "preparing" && !order.can_assemble && (
+            <div className="bg-danger/5 border border-danger/20 rounded-lg p-4">
+              <div className="text-danger font-medium text-sm mb-2">
+                ⚠️ 无法进入装配，存在以下问题：
+              </div>
+              <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
+                {!order.compatibility?.compatible && (
+                  <li>
+                    <span className="text-danger">兼容性冲突：</span>
+                    {order.compatibility?.issues?.map((iss, i) => (
+                      <span key={i}>
+                        {iss.part_a} 与 {iss.part_b}：{iss.note}
+                        {i < order.compatibility.issues.length - 1 ? "；" : ""}
+                      </span>
+                    )) || "存在兼容性冲突"}
+                  </li>
+                )}
+                {!order.stock_consumed && (
+                  <li>
+                    <span className="text-danger">库存未扣减：</span>
+                    请确认报价完成备料（客户需确认报价）
+                  </li>
+                )}
+                {(order.parts?.length || 0) < 3 && (
+                  <li>
+                    <span className="text-danger">配置不完整：</span>
+                    至少需要配置车架、轮组、传动系统
+                  </li>
+                )}
+              </ul>
+            </div>
           )}
-          {order.status === "quote_pending" && (
-            <button
-              className="btn-secondary"
-              onClick={() => navigate(`/consultant/${order.id}`)}
-            >
-              📄 查看报价
-            </button>
-          )}
-          <div className="ml-auto flex gap-3">
-            <button className="btn-primary" onClick={handleNextStatus}>
-              {order.status === "quote_pending"
-                ? "✅ 客户确认报价 →"
-                : "推进到下一状态 →"}
-            </button>
+          <div className="flex items-center justify-between">
+            {order.status === "draft" && (
+              <button
+                className="btn-secondary"
+                onClick={() => navigate(`/consultant/${order.id}`)}
+              >
+                🛠️ 前往配置
+              </button>
+            )}
+            {order.status === "quote_pending" && (
+              <button
+                className="btn-secondary"
+                onClick={() => navigate(`/consultant/${order.id}`)}
+              >
+                📄 查看报价
+              </button>
+            )}
+            <div className="ml-auto flex gap-3 items-center">
+              {!canAdvance().ok &&
+                canAdvance().reason &&
+                order.status !== "draft" && (
+                  <span className="text-xs text-gray-400 mr-2">
+                    {canAdvance().reason}
+                  </span>
+                )}
+              <button
+                className="btn-primary"
+                onClick={handleNextStatus}
+                disabled={!canAdvance().ok}
+                style={{
+                  opacity: !canAdvance().ok ? 0.5 : 1,
+                  cursor: !canAdvance().ok ? "not-allowed" : "pointer",
+                }}
+              >
+                {order.status === "quote_pending"
+                  ? "✅ 客户确认报价 →"
+                  : "推进到下一状态 →"}
+              </button>
+            </div>
           </div>
         </div>
       )}

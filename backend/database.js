@@ -44,7 +44,7 @@ function initDB() {
       riding_style TEXT,
       budget REAL,
       color_preference TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
+      status TEXT NOT NULL DEFAULT 'draft',
       frame_id INTEGER,
       wheelset_id INTEGER,
       drivetrain_id INTEGER,
@@ -57,6 +57,11 @@ function initDB() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       delivered_at DATETIME,
       notes TEXT,
+      quote_generated_at DATETIME,
+      quote_confirmed_at DATETIME,
+      quote_confirmed_by TEXT,
+      quote_valid_hours INTEGER DEFAULT 24,
+      stock_reserved INTEGER DEFAULT 0,
       FOREIGN KEY (frame_id) REFERENCES parts(id),
       FOREIGN KEY (wheelset_id) REFERENCES parts(id),
       FOREIGN KEY (drivetrain_id) REFERENCES parts(id),
@@ -75,19 +80,36 @@ function initDB() {
       FOREIGN KEY (order_id) REFERENCES orders(id)
     );
 
+    CREATE TABLE IF NOT EXISTS stock_reservations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      part_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'reserved',
+      reserved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      released_at DATETIME,
+      consumed_at DATETIME,
+      FOREIGN KEY (order_id) REFERENCES orders(id),
+      FOREIGN KEY (part_id) REFERENCES parts(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
     CREATE INDEX IF NOT EXISTS idx_parts_category ON parts(category);
     CREATE INDEX IF NOT EXISTS idx_order_logs_order ON order_status_logs(order_id);
+    CREATE INDEX IF NOT EXISTS idx_reservations_order ON stock_reservations(order_id);
+    CREATE INDEX IF NOT EXISTS idx_reservations_part ON stock_reservations(part_id);
+    CREATE INDEX IF NOT EXISTS idx_reservations_status ON stock_reservations(status);
   `);
 }
 
 const ORDER_STATUSES = [
-  { key: "pending", label: "待确认", color: "warning", step: 0 },
-  { key: "preparing", label: "备料中", color: "primary", step: 1 },
-  { key: "assembling", label: "装配中", color: "primary", step: 2 },
-  { key: "debugging", label: "调试中", color: "secondary", step: 3 },
-  { key: "ready", label: "可取车", color: "success", step: 4 },
-  { key: "delivered", label: "已交付", color: "gray-500", step: 5 },
+  { key: "draft", label: "草稿报价", color: "gray-500", step: -2 },
+  { key: "quote_pending", label: "待客户确认", color: "warning", step: -1 },
+  { key: "preparing", label: "备料中", color: "primary", step: 0 },
+  { key: "assembling", label: "装配中", color: "primary", step: 1 },
+  { key: "debugging", label: "调试中", color: "secondary", step: 2 },
+  { key: "ready", label: "可取车", color: "success", step: 3 },
+  { key: "delivered", label: "已交付", color: "gray-500", step: 4 },
 ];
 
 const USE_TYPES = [

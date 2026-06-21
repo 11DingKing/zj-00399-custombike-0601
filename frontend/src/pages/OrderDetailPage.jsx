@@ -11,6 +11,31 @@ const statusFlow = [
   { key: "delivered", label: "已交付" },
 ];
 
+const adjustmentStatusFlow = [
+  { key: "adjust_pending", label: "待调整" },
+  { key: "adjusting", label: "调整中" },
+  { key: "adjust_debugging", label: "调试中" },
+  { key: "adjust_ready", label: "完成可取" },
+  { key: "adjust_delivered", label: "已交付" },
+];
+
+const issueTypes = [
+  { key: "handlebar", label: "把位不合适", category: "handlebar", icon: "🎯" },
+  { key: "saddle", label: "座高不合适", category: "saddle", icon: "🪑" },
+  {
+    key: "drivetrain",
+    label: "传动系统问题",
+    category: "drivetrain",
+    icon: "⚙️",
+  },
+  {
+    key: "smart_accessory",
+    label: "智能配件问题",
+    category: "smart_accessory",
+    icon: "📱",
+  },
+];
+
 const productionFlow = [
   { key: "preparing", label: "备料中" },
   { key: "assembling", label: "装配中" },
@@ -34,19 +59,48 @@ export default function OrderDetailPage() {
   const [order, setOrder] = useState(null);
   const [logs, setLogs] = useState([]);
   const [reservations, setReservations] = useState([]);
+  const [adjustments, setAdjustments] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showAdjustmentModal, setShowAdjustmentModal] = useState(false);
+  const [adjustmentForm, setAdjustmentForm] = useState({
+    issue_type: "",
+    issue_description: "",
+    new_part_id: null,
+    estimated_days: 3,
+    notes: "",
+  });
+  const [availableParts, setAvailableParts] = useState([]);
+  const [submittingAdjustment, setSubmittingAdjustment] = useState(false);
+  const [meta, setMeta] = useState(null);
+
+  useEffect(() => {
+    loadMeta();
+  }, []);
 
   useEffect(() => {
     loadOrder();
   }, [id]);
 
+  const loadMeta = async () => {
+    try {
+      const res = await fetch("/api/meta");
+      if (res.ok) {
+        const data = await res.json();
+        setMeta(data);
+      }
+    } catch (e) {
+      console.error("加载元数据失败", e);
+    }
+  };
+
   const loadOrder = async () => {
     setLoading(true);
     try {
-      const [orderRes, logsRes, resRes] = await Promise.all([
+      const [orderRes, logsRes, resRes, adjRes] = await Promise.all([
         fetch(`/api/orders/${id}`),
         fetch(`/api/orders/${id}/logs`),
         fetch(`/api/orders/${id}/reservations`),
+        fetch(`/api/orders/${id}/adjustments`),
       ]);
       if (orderRes.ok) {
         const data = await orderRes.json();
@@ -60,6 +114,10 @@ export default function OrderDetailPage() {
       if (resRes.ok) {
         const data = await resRes.json();
         setReservations(data);
+      }
+      if (adjRes.ok) {
+        const data = await adjRes.json();
+        setAdjustments(data);
       }
     } catch (e) {
       console.error("加载订单详情失败", e);
@@ -156,6 +214,74 @@ export default function OrderDetailPage() {
     }
   };
 
+  const handleIssueTypeSelect = async (issueType) => {
+    const issueInfo = issueTypes.find((t) => t.key === issueType);
+    setAdjustmentForm({
+      ...adjustmentForm,
+      issue_type: issueType,
+      new_part_id: null,
+    });
+
+    if (issueInfo && order) {
+      try {
+        const res = await fetch(
+          `/api/parts?category=${issueInfo.category}&use_type=${order.use_type}`,
+        );
+        if (res.ok) {
+          const data = await res.json();
+          setAvailableParts(data.filter((p) => p.effective_stock > 0));
+        }
+      } catch (e) {
+        console.error("加载配件失败", e);
+      }
+    }
+  };
+
+  const handleCreateAdjustment = async () => {
+    if (!adjustmentForm.issue_type) {
+      alert("请选择问题类型");
+      return;
+    }
+
+    setSubmittingAdjustment(true);
+    try {
+      const res = await fetch(`/api/orders/${id}/adjustments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...adjustmentForm,
+          operator: "门店顾问",
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        alert(`调整单创建成功！调整单号：${data.adjustment_no}`);
+        setShowAdjustmentModal(false);
+        setAdjustmentForm({
+          issue_type: "",
+          issue_description: "",
+          new_part_id: null,
+          estimated_days: 3,
+          notes: "",
+        });
+        setAvailableParts([]);
+        loadOrder();
+      } else {
+        const data = await res.json();
+        alert(data.error || "创建失败");
+      }
+    } catch (e) {
+      alert("网络错误");
+    } finally {
+      setSubmittingAdjustment(false);
+    }
+  };
+
+  const hasActiveAdjustment = adjustments.some(
+    (a) => a.status !== "adjust_delivered",
+  );
+
   if (loading) {
     return <div className="card p-8 text-center text-gray-400">加载中...</div>;
   }
@@ -244,6 +370,14 @@ export default function OrderDetailPage() {
             <div className="text-3xl font-bold text-primary">
               ¥{order.total_price?.toLocaleString() || 0}
             </div>
+            {adjustments.length > 0 && (
+              <div className="text-xs text-gray-400 mt-1">
+                共 {adjustments.length} 次调整
+                {hasActiveAdjustment && (
+                  <span className="text-warning ml-2">（有进行中的调整）</span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -668,6 +802,351 @@ export default function OrderDetailPage() {
                 {order.status === "quote_pending"
                   ? "✅ 客户确认报价 →"
                   : "推进到下一状态 →"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {order.status === "delivered" && (
+        <div className="space-y-3">
+          <div className="bg-info/5 border border-info/20 rounded-lg p-4">
+            <div className="text-info font-medium text-sm mb-2">
+              ℹ️ 订单已完成交付
+            </div>
+            <p className="text-sm text-gray-600">
+              如客户反馈使用问题，可发起二次调整。调整单将进入技师看板，保留完整调整历史。
+            </p>
+          </div>
+          <div className="flex justify-end">
+            <button
+              className="btn-primary flex items-center gap-2"
+              onClick={() => setShowAdjustmentModal(true)}
+              disabled={hasActiveAdjustment}
+              style={{
+                opacity: hasActiveAdjustment ? 0.5 : 1,
+                cursor: hasActiveAdjustment ? "not-allowed" : "pointer",
+              }}
+            >
+              <span>🔧</span>
+              {hasActiveAdjustment ? "有进行中的调整" : "发起二次调整"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {adjustments.length > 0 && (
+        <div className="card p-6 mt-6">
+          <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+            <span>🔧</span>
+            调整历史
+            <span className="ml-auto bg-primary/10 text-primary text-xs px-2 py-0.5 rounded-full">
+              共 {adjustments.length} 次
+            </span>
+          </h3>
+          <div className="space-y-4">
+            {adjustments.map((adj, idx) => {
+              const adjStep = adjustmentStatusFlow.findIndex(
+                (s) => s.key === adj.status,
+              );
+              return (
+                <div
+                  key={adj.id}
+                  className="border border-gray-200 rounded-lg p-4 hover:border-primary/30 transition-colors cursor-pointer"
+                  onClick={() => navigate(`/adjustments/${adj.id}`)}
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="font-medium">{adj.adjustment_no}</span>
+                        <span
+                          className={`text-xs px-2 py-0.5 rounded-full ${
+                            adj.status === "adjust_delivered"
+                              ? "bg-gray-100 text-gray-500"
+                              : adj.is_overdue
+                                ? "bg-danger/10 text-danger"
+                                : "bg-primary/10 text-primary"
+                          }`}
+                        >
+                          {adj.status_label}
+                          {adj.is_overdue && "（超期）"}
+                        </span>
+                      </div>
+                      <div className="text-sm text-gray-500">
+                        {adj.issue_type_icon} {adj.issue_type_label}
+                      </div>
+                    </div>
+                    <div className="text-right text-sm">
+                      <div className="text-gray-500">
+                        创建于 {adj.created_at?.slice(0, 10)}
+                      </div>
+                      {adj.price_adjustment !== 0 && (
+                        <div
+                          className={`font-medium ${
+                            adj.price_adjustment > 0
+                              ? "text-danger"
+                              : "text-success"
+                          }`}
+                        >
+                          {adj.price_adjustment > 0 ? "+" : ""}¥
+                          {adj.price_adjustment.toLocaleString()}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mb-3">
+                    <div className="flex items-center justify-between mb-2">
+                      {adj.original_part && (
+                        <div className="flex-1 text-sm">
+                          <div className="text-gray-400 text-xs mb-1">
+                            原配件
+                          </div>
+                          <div className="font-medium">
+                            {adj.original_part.name}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            ¥{adj.original_part.price.toLocaleString()}
+                          </div>
+                        </div>
+                      )}
+                      {adj.original_part && adj.new_part && (
+                        <div className="px-4 text-gray-300">→</div>
+                      )}
+                      {adj.new_part && (
+                        <div className="flex-1 text-sm">
+                          <div className="text-gray-400 text-xs mb-1">
+                            更换为
+                          </div>
+                          <div className="font-medium text-primary">
+                            {adj.new_part.name}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            ¥{adj.new_part.price.toLocaleString()}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      {adjustmentStatusFlow.map((s, i) => (
+                        <div key={s.key} className="flex-1 text-center px-1">
+                          <div
+                            className={`w-6 h-6 mx-auto rounded-full flex items-center justify-center text-xs ${
+                              i <= adjStep
+                                ? "bg-primary text-white"
+                                : "bg-gray-100 text-gray-400"
+                            }`}
+                          >
+                            {i < adjStep ? "✓" : i + 1}
+                          </div>
+                          <div
+                            className={`text-xs mt-1 ${
+                              i <= adjStep ? "text-gray-700" : "text-gray-400"
+                            }`}
+                          >
+                            {s.label}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="relative h-1.5 bg-gray-100 rounded-full">
+                      <div
+                        className="absolute top-0 left-0 h-full bg-primary rounded-full transition-all"
+                        style={{
+                          width: `${(adjStep / (adjustmentStatusFlow.length - 1)) * 100}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {showAdjustmentModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-100">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xl font-semibold">发起二次调整</h3>
+                <button
+                  className="text-gray-400 hover:text-gray-600 text-2xl"
+                  onClick={() => {
+                    setShowAdjustmentModal(false);
+                    setAdjustmentForm({
+                      issue_type: "",
+                      issue_description: "",
+                      new_part_id: null,
+                      estimated_days: 3,
+                      notes: "",
+                    });
+                    setAvailableParts([]);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+              <p className="text-sm text-gray-500 mt-1">
+                原订单：{order.order_no} · 客户：{order.customer_name}
+              </p>
+            </div>
+
+            <div className="p-6 space-y-6">
+              <div>
+                <label className="label">问题类型 *</label>
+                <div className="grid grid-cols-2 gap-3">
+                  {issueTypes.map((type) => (
+                    <button
+                      key={type.key}
+                      onClick={() => handleIssueTypeSelect(type.key)}
+                      className={`p-4 rounded-xl border-2 text-left transition-all ${
+                        adjustmentForm.issue_type === type.key
+                          ? "border-primary bg-primary/5"
+                          : "border-gray-100 hover:border-gray-200"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xl">{type.icon}</span>
+                        <span className="font-medium">{type.label}</span>
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        {
+                          partCategories.find((c) => c.key === type.category)
+                            ?.label
+                        }
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {adjustmentForm.issue_type && (
+                <div>
+                  <label className="label">问题描述</label>
+                  <textarea
+                    className="input-field h-24 resize-none"
+                    placeholder="请详细描述客户反馈的问题..."
+                    value={adjustmentForm.issue_description}
+                    onChange={(e) =>
+                      setAdjustmentForm({
+                        ...adjustmentForm,
+                        issue_description: e.target.value,
+                      })
+                    }
+                  />
+                </div>
+              )}
+
+              {adjustmentForm.issue_type && availableParts.length > 0 && (
+                <div>
+                  <label className="label">选择更换配件（可选）</label>
+                  <p className="text-xs text-gray-400 mb-3">
+                    如不需要更换配件，可跳过此步
+                  </p>
+                  <div className="grid grid-cols-2 gap-3 max-h-60 overflow-y-auto">
+                    {availableParts.map((part) => (
+                      <button
+                        key={part.id}
+                        onClick={() =>
+                          setAdjustmentForm({
+                            ...adjustmentForm,
+                            new_part_id:
+                              adjustmentForm.new_part_id === part.id
+                                ? null
+                                : part.id,
+                          })
+                        }
+                        className={`p-3 rounded-lg border-2 text-left transition-all ${
+                          adjustmentForm.new_part_id === part.id
+                            ? "border-primary bg-primary/5"
+                            : "border-gray-100 hover:border-gray-200"
+                        }`}
+                      >
+                        <div className="font-medium text-sm truncate">
+                          {part.name}
+                        </div>
+                        <div className="text-xs text-gray-400 mb-1">
+                          {part.brand} · {part.specs}
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-primary font-medium text-sm">
+                            ¥{part.price.toLocaleString()}
+                          </span>
+                          <span className="text-xs bg-success/10 text-success px-1.5 py-0.5 rounded">
+                            可用 {part.effective_stock}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="label">预计调整天数</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    className="input-field w-24"
+                    value={adjustmentForm.estimated_days}
+                    onChange={(e) =>
+                      setAdjustmentForm({
+                        ...adjustmentForm,
+                        estimated_days: parseInt(e.target.value) || 1,
+                      })
+                    }
+                    min="1"
+                    max="30"
+                  />
+                  <span className="text-sm text-gray-500">天</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="label">备注</label>
+                <textarea
+                  className="input-field h-20 resize-none"
+                  placeholder="其他需要说明的事项..."
+                  value={adjustmentForm.notes}
+                  onChange={(e) =>
+                    setAdjustmentForm({
+                      ...adjustmentForm,
+                      notes: e.target.value,
+                    })
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-gray-100 flex justify-end gap-3">
+              <button
+                className="btn-secondary"
+                onClick={() => {
+                  setShowAdjustmentModal(false);
+                  setAdjustmentForm({
+                    issue_type: "",
+                    issue_description: "",
+                    new_part_id: null,
+                    estimated_days: 3,
+                    notes: "",
+                  });
+                  setAvailableParts([]);
+                }}
+                disabled={submittingAdjustment}
+              >
+                取消
+              </button>
+              <button
+                className="btn-primary"
+                onClick={handleCreateAdjustment}
+                disabled={submittingAdjustment || !adjustmentForm.issue_type}
+              >
+                {submittingAdjustment ? "创建中..." : "确认创建调整单"}
               </button>
             </div>
           </div>

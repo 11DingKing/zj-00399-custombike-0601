@@ -6,6 +6,9 @@ const {
   ORDER_STATUSES,
   USE_TYPES,
   PART_CATEGORIES,
+  ADJUSTMENT_STATUSES,
+  ADJUSTMENT_ISSUE_TYPES,
+  ADJUSTABLE_CATEGORIES,
 } = require("./database");
 const { seedData } = require("./seed");
 
@@ -119,6 +122,58 @@ function getEffectiveStock(partId) {
     )
     .get(partId).total;
   return part.stock - reserved;
+}
+
+function releaseAdjustmentStockReservations(adjustmentId) {
+  db.prepare(
+    "UPDATE stock_reservations SET status = 'released', released_at = CURRENT_TIMESTAMP WHERE adjustment_id = ? AND status = 'reserved'",
+  ).run(adjustmentId);
+  db.prepare(
+    "UPDATE adjustments SET stock_reserved = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+  ).run(adjustmentId);
+}
+
+function consumeAdjustmentStockReservations(adjustmentId) {
+  const reservations = db
+    .prepare(
+      "SELECT * FROM stock_reservations WHERE adjustment_id = ? AND status = 'reserved'",
+    )
+    .all(adjustmentId);
+
+  for (const r of reservations) {
+    db.prepare("UPDATE parts SET stock = stock - ? WHERE id = ?").run(
+      r.quantity,
+      r.part_id,
+    );
+  }
+
+  db.prepare(
+    "UPDATE stock_reservations SET status = 'consumed', consumed_at = CURRENT_TIMESTAMP WHERE adjustment_id = ? AND status = 'reserved'",
+  ).run(adjustmentId);
+}
+
+function createAdjustmentStockReservations(adjustmentId, partIds) {
+  releaseAdjustmentStockReservations(adjustmentId);
+  const insert = db.prepare(
+    "INSERT INTO stock_reservations (adjustment_id, part_id, quantity) VALUES (?, ?, 1)",
+  );
+  for (const pid of partIds) {
+    insert.run(adjustmentId, pid);
+  }
+  db.prepare(
+    "UPDATE adjustments SET stock_reserved = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+  ).run(adjustmentId);
+}
+
+function getAdjustmentStockReservations(adjustmentId) {
+  return db
+    .prepare(
+      `SELECT r.*, p.name as part_name, p.category, p.price, p.stock as part_stock
+       FROM stock_reservations r 
+       LEFT JOIN parts p ON r.part_id = p.id 
+       WHERE r.adjustment_id = ? ORDER BY r.id ASC`,
+    )
+    .all(adjustmentId);
 }
 
 function releaseStockReservations(orderId) {
@@ -369,11 +424,135 @@ function formatOrder(order) {
   };
 }
 
+function formatAdjustment(adjustment) {
+  if (!adjustment) return null;
+
+  const statusInfo =
+    ADJUSTMENT_STATUSES.find((s) => s.key === adjustment.status) ||
+    ADJUSTMENT_STATUSES[0];
+
+  const issueInfo = ADJUSTMENT_ISSUE_TYPES.find(
+    (t) => t.key === adjustment.issue_type,
+  );
+
+  const minStep = Math.min(...ADJUSTMENT_STATUSES.map((s) => s.step));
+  const maxStep = Math.max(...ADJUSTMENT_STATUSES.map((s) => s.step));
+  const range = maxStep - minStep;
+  const progress = range > 0 ? ((statusInfo.step - minStep) / range) * 100 : 0;
+
+  const createdDate = new Date(adjustment.created_at);
+  const estimatedDate = new Date(
+    createdDate.getTime() +
+      (adjustment.estimated_days || 3) * 24 * 60 * 60 * 1000,
+  );
+  const now = new Date();
+  const activeStatuses = [
+    "adjust_pending",
+    "adjusting",
+    "adjust_debugging",
+    "adjust_ready",
+  ];
+  const isOverdue =
+    adjustment.status !== "adjust_delivered" &&
+    activeStatuses.includes(adjustment.status) &&
+    now > estimatedDate;
+  const daysRemaining = Math.ceil(
+    (estimatedDate - now) / (24 * 60 * 60 * 1000),
+  );
+
+  const originalPart = adjustment.original_part_id
+    ? db
+        .prepare(
+          "SELECT id, name, category, brand, specs, price FROM parts WHERE id = ?",
+        )
+        .get(adjustment.original_part_id)
+    : null;
+
+  const newPart = adjustment.new_part_id
+    ? db
+        .prepare(
+          "SELECT id, name, category, brand, specs, price, stock FROM parts WHERE id = ?",
+        )
+        .get(adjustment.new_part_id)
+    : null;
+
+  if (newPart) {
+    newPart.effective_stock = getEffectiveStock(newPart.id);
+  }
+
+  const order = db
+    .prepare("SELECT order_no, customer_phone FROM orders WHERE id = ?")
+    .get(adjustment.order_id);
+
+  const consumedCount = db
+    .prepare(
+      "SELECT COUNT(*) as cnt FROM stock_reservations WHERE adjustment_id = ? AND status = 'consumed'",
+    )
+    .get(adjustment.id).cnt;
+  const stockConsumed = consumedCount > 0;
+
+  return {
+    id: adjustment.id,
+    adjustment_no: adjustment.adjustment_no,
+    order_id: adjustment.order_id,
+    order_no: order?.order_no || null,
+    customer_name: adjustment.customer_name,
+    customer_phone: order?.customer_phone || null,
+    issue_type: adjustment.issue_type,
+    issue_type_label: issueInfo?.label || adjustment.issue_type,
+    issue_type_icon: issueInfo?.icon || "🔧",
+    issue_description: adjustment.issue_description,
+    status: adjustment.status,
+    status_label: statusInfo.label,
+    status_color: statusInfo.color,
+    progress: Math.max(0, Math.round(progress)),
+    part_category: adjustment.part_category,
+    part_category_label:
+      PART_CATEGORIES.find((c) => c.key === adjustment.part_category)?.label ||
+      adjustment.part_category,
+    original_part: originalPart,
+    new_part: newPart,
+    estimated_days: adjustment.estimated_days || 3,
+    estimated_date: estimatedDate.toISOString().split("T")[0],
+    is_overdue: isOverdue,
+    days_remaining: daysRemaining,
+    price_adjustment: adjustment.price_adjustment || 0,
+    operator: adjustment.operator,
+    technician: adjustment.technician,
+    created_at: adjustment.created_at,
+    updated_at: adjustment.updated_at,
+    completed_at: adjustment.completed_at,
+    delivered_at: adjustment.delivered_at,
+    notes: adjustment.notes,
+    stock_reserved: adjustment.stock_reserved || 0,
+    stock_consumed: stockConsumed,
+    can_adjust: stockConsumed && adjustment.new_part_id && isOverdue === false,
+  };
+}
+
+function generateAdjustmentNo() {
+  const now = new Date();
+  const dateStr =
+    now.getFullYear().toString() +
+    (now.getMonth() + 1).toString().padStart(2, "0") +
+    now.getDate().toString().padStart(2, "0");
+
+  const count = db
+    .prepare(
+      "SELECT COUNT(*) as count FROM adjustments WHERE adjustment_no LIKE ?",
+    )
+    .get(`ADJ${dateStr}%`).count;
+  return `ADJ${dateStr}${(count + 1).toString().padStart(3, "0")}`;
+}
+
 app.get("/api/meta", (req, res) => {
   res.json({
     order_statuses: ORDER_STATUSES,
     use_types: USE_TYPES,
     part_categories: PART_CATEGORIES,
+    adjustment_statuses: ADJUSTMENT_STATUSES,
+    adjustment_issue_types: ADJUSTMENT_ISSUE_TYPES,
+    adjustable_categories: ADJUSTABLE_CATEGORIES,
   });
 });
 
@@ -461,6 +640,20 @@ app.get("/api/orders/:id", (req, res) => {
   const formatted = formatOrder(order);
   formatted.reservations = getStockReservations(req.params.id);
   res.json(formatted);
+});
+
+app.get("/api/customer/orders", (req, res) => {
+  const { phone } = req.query;
+  if (!phone) {
+    return res.status(400).json({ error: "请提供手机号" });
+  }
+  const orders = db
+    .prepare(
+      "SELECT * FROM orders WHERE customer_phone = ? ORDER BY created_at DESC",
+    )
+    .all(phone);
+  const detailedOrders = orders.map((order) => formatOrder(order));
+  res.json(detailedOrders);
 });
 
 function generateOrderNo() {
@@ -1080,6 +1273,24 @@ app.get("/api/stats", (req, res) => {
     )
     .get().count;
 
+  const adjustmentOverdueCount = db
+    .prepare(
+      `
+    SELECT COUNT(*) as count FROM adjustments
+    WHERE status IN ('adjust_pending', 'adjusting', 'adjust_debugging', 'adjust_ready')
+    AND date(created_at, '+' || estimated_days || ' days') < date('now')
+  `,
+    )
+    .get().count;
+
+  const adjustmentStatusCounts = {};
+  for (const s of ADJUSTMENT_STATUSES) {
+    const count = db
+      .prepare("SELECT COUNT(*) as count FROM adjustments WHERE status = ?")
+      .get(s.key).count;
+    adjustmentStatusCounts[s.key] = count;
+  }
+
   res.json({
     status_counts: statusCounts,
     overdue_count: overdueCount,
@@ -1087,6 +1298,9 @@ app.get("/api/stats", (req, res) => {
     total_parts: totalParts,
     low_stock_parts: lowStockParts,
     reserved_stock_count: reservedCount,
+    adjustment_overdue_count: adjustmentOverdueCount,
+    adjustment_status_counts: adjustmentStatusCounts,
+    total_overdue_count: overdueCount + adjustmentOverdueCount,
   });
 });
 
@@ -1142,6 +1356,368 @@ app.get("/api/recommend-parts", (req, res) => {
   }));
 
   res.json(recommendations);
+});
+
+const adjustmentsBaseQuery = `
+  SELECT a.* FROM adjustments a
+`;
+
+const getAdjustmentById = db.prepare(adjustmentsBaseQuery + " WHERE a.id = ?");
+const getAllAdjustments = db.prepare(
+  adjustmentsBaseQuery + " ORDER BY a.created_at DESC",
+);
+const getAdjustmentsByStatus = db.prepare(
+  adjustmentsBaseQuery + " WHERE a.status = ? ORDER BY a.created_at DESC",
+);
+const getAdjustmentsByOrderId = db.prepare(
+  adjustmentsBaseQuery + " WHERE a.order_id = ? ORDER BY a.created_at DESC",
+);
+
+app.post("/api/orders/:id/adjustments", (req, res) => {
+  const orderId = req.params.id;
+  const {
+    issue_type,
+    issue_description,
+    new_part_id,
+    estimated_days,
+    operator,
+    notes,
+  } = req.body;
+
+  if (!issue_type) {
+    return res.status(400).json({ error: "问题类型为必填项" });
+  }
+
+  const existingOrder = db
+    .prepare("SELECT * FROM orders WHERE id = ?")
+    .get(orderId);
+  if (!existingOrder) {
+    return res.status(404).json({ error: "订单不存在" });
+  }
+
+  if (existingOrder.status !== "delivered") {
+    return res.status(400).json({
+      error:
+        "只有已交付的订单才能发起调整，当前状态：" +
+        (ORDER_STATUSES.find((s) => s.key === existingOrder.status)?.label ||
+          existingOrder.status),
+    });
+  }
+
+  const issueInfo = ADJUSTMENT_ISSUE_TYPES.find((t) => t.key === issue_type);
+  if (!issueInfo) {
+    return res.status(400).json({ error: "无效的问题类型" });
+  }
+
+  const partCategory = issueInfo.category;
+  const partIdField = `${partCategory}_id`;
+  const originalPartId = existingOrder[partIdField];
+
+  let priceAdjustment = 0;
+  if (new_part_id && originalPartId) {
+    const newPart = db
+      .prepare("SELECT price FROM parts WHERE id = ?")
+      .get(new_part_id);
+    const originalPart = db
+      .prepare("SELECT price FROM parts WHERE id = ?")
+      .get(originalPartId);
+    if (newPart && originalPart) {
+      priceAdjustment = newPart.price - originalPart.price;
+    }
+  }
+
+  if (new_part_id) {
+    const effective = getEffectiveStock(new_part_id);
+    if (effective <= 0) {
+      return res.status(400).json({ error: "所选配件库存不足" });
+    }
+  }
+
+  const adjustmentNo = generateAdjustmentNo();
+
+  const result = db
+    .prepare(
+      `
+    INSERT INTO adjustments (
+      adjustment_no, order_id, customer_name, issue_type, issue_description,
+      status, original_part_id, new_part_id, part_category, estimated_days,
+      price_adjustment, operator, notes
+    ) VALUES (?, ?, ?, ?, ?, 'adjust_pending', ?, ?, ?, ?, ?, ?, ?)
+  `,
+    )
+    .run(
+      adjustmentNo,
+      orderId,
+      existingOrder.customer_name,
+      issue_type,
+      issue_description || "",
+      originalPartId || null,
+      new_part_id || null,
+      partCategory,
+      estimated_days || 3,
+      priceAdjustment,
+      operator || "门店顾问",
+      notes || "",
+    );
+
+  db.prepare(
+    `
+    INSERT INTO adjustment_status_logs (adjustment_id, status, operator, remark)
+    VALUES (?, ?, ?, ?)
+  `,
+  ).run(
+    result.lastInsertRowid,
+    "adjust_pending",
+    operator || "门店顾问",
+    "调整单创建，等待安排技师",
+  );
+
+  if (new_part_id) {
+    createAdjustmentStockReservations(result.lastInsertRowid, [new_part_id]);
+  }
+
+  const adjustment = getAdjustmentById.get(result.lastInsertRowid);
+  res.status(201).json(formatAdjustment(adjustment));
+});
+
+app.get("/api/adjustments", (req, res) => {
+  const { status } = req.query;
+
+  let adjustments;
+  if (status && status !== "all") {
+    adjustments = getAdjustmentsByStatus.all(status);
+  } else {
+    adjustments = getAllAdjustments.all();
+  }
+
+  const formatted = adjustments.map((a) => formatAdjustment(a));
+  res.json(formatted);
+});
+
+app.get("/api/adjustments/:id", (req, res) => {
+  const adjustment = getAdjustmentById.get(req.params.id);
+  if (!adjustment) {
+    return res.status(404).json({ error: "调整单不存在" });
+  }
+
+  const formatted = formatAdjustment(adjustment);
+  formatted.reservations = getAdjustmentStockReservations(req.params.id);
+  formatted.logs = db
+    .prepare(
+      "SELECT * FROM adjustment_status_logs WHERE adjustment_id = ? ORDER BY created_at ASC",
+    )
+    .all(req.params.id);
+  res.json(formatted);
+});
+
+app.get("/api/orders/:id/adjustments", (req, res) => {
+  const adjustments = getAdjustmentsByOrderId.all(req.params.id);
+  const formatted = adjustments.map((a) => formatAdjustment(a));
+  res.json(formatted);
+});
+
+app.get("/api/adjustments/:id/logs", (req, res) => {
+  const logs = db
+    .prepare(
+      "SELECT * FROM adjustment_status_logs WHERE adjustment_id = ? ORDER BY created_at ASC",
+    )
+    .all(req.params.id);
+  res.json(logs);
+});
+
+app.get("/api/adjustments/:id/reservations", (req, res) => {
+  const reservations = getAdjustmentStockReservations(req.params.id);
+  res.json(reservations);
+});
+
+function validateAdjustmentStatusTransition(currentStatus, targetStatus) {
+  const currentInfo = ADJUSTMENT_STATUSES.find((s) => s.key === currentStatus);
+  const targetInfo = ADJUSTMENT_STATUSES.find((s) => s.key === targetStatus);
+  if (!currentInfo || !targetInfo) {
+    return { valid: false, reason: "无效的状态" };
+  }
+
+  if (currentStatus === "adjust_delivered") {
+    return { valid: false, reason: "已交付的调整单不能修改状态" };
+  }
+
+  const currentStep = currentInfo.step;
+  const targetStep = targetInfo.step;
+  const stepDiff = targetStep - currentStep;
+
+  if (stepDiff === 0) {
+    return { valid: false, reason: "状态未发生变化" };
+  }
+
+  if (stepDiff > 1) {
+    return {
+      valid: false,
+      reason: `不能从「${currentInfo.label}」直接跳转到「${targetInfo.label}」，请按业务顺序逐步推进`,
+    };
+  }
+
+  if (stepDiff < -1) {
+    return {
+      valid: false,
+      reason: `不能从「${currentInfo.label}」回退到「${targetInfo.label}」，只能回退到上一个状态`,
+    };
+  }
+
+  return { valid: true };
+}
+
+app.put("/api/adjustments/:id/status", (req, res) => {
+  const { status, operator, remark } = req.body;
+  const adjustmentId = req.params.id;
+
+  const validStatuses = ADJUSTMENT_STATUSES.map((s) => s.key);
+  if (!validStatuses.includes(status)) {
+    return res.status(400).json({ error: "无效的状态" });
+  }
+
+  const existingAdjustment = db
+    .prepare("SELECT * FROM adjustments WHERE id = ?")
+    .get(adjustmentId);
+  if (!existingAdjustment) {
+    return res.status(404).json({ error: "调整单不存在" });
+  }
+
+  const transition = validateAdjustmentStatusTransition(
+    existingAdjustment.status,
+    status,
+  );
+  if (!transition.valid) {
+    return res.status(400).json({ error: transition.reason });
+  }
+
+  if (
+    existingAdjustment.status === "adjust_pending" &&
+    status === "adjusting"
+  ) {
+    if (!existingAdjustment.new_part_id) {
+      return res.status(400).json({
+        error: "请先选择更换的配件才能开始调整",
+      });
+    }
+
+    const consumedCount = db
+      .prepare(
+        "SELECT COUNT(*) as cnt FROM stock_reservations WHERE adjustment_id = ? AND status = 'consumed'",
+      )
+      .get(adjustmentId).cnt;
+    if (consumedCount === 0) {
+      consumeAdjustmentStockReservations(adjustmentId);
+    }
+  }
+
+  if (
+    existingAdjustment.status === "adjusting" &&
+    status === "adjust_pending"
+  ) {
+    return res.status(400).json({
+      error: "调整已开始，不能回退到待调整状态",
+    });
+  }
+
+  let completedAt = existingAdjustment.completed_at;
+  if (status === "adjust_ready") {
+    completedAt = new Date().toISOString();
+  }
+
+  let deliveredAt = existingAdjustment.delivered_at;
+  if (status === "adjust_delivered") {
+    deliveredAt = new Date().toISOString();
+  }
+
+  db.prepare(
+    `
+    UPDATE adjustments SET 
+      status = ?, updated_at = CURRENT_TIMESTAMP, 
+      completed_at = ?, delivered_at = ?, technician = ?
+    WHERE id = ?
+  `,
+  ).run(
+    status,
+    completedAt,
+    deliveredAt,
+    operator || existingAdjustment.technician || "技师小李",
+    adjustmentId,
+  );
+
+  db.prepare(
+    `
+    INSERT INTO adjustment_status_logs (adjustment_id, status, operator, remark)
+    VALUES (?, ?, ?, ?)
+  `,
+  ).run(
+    adjustmentId,
+    status,
+    operator || "技师小李",
+    remark ||
+      `推进至${ADJUSTMENT_STATUSES.find((s) => s.key === status)?.label}`,
+  );
+
+  const adjustment = getAdjustmentById.get(adjustmentId);
+  res.json(formatAdjustment(adjustment));
+});
+
+app.put("/api/adjustments/:id/parts", (req, res) => {
+  const { new_part_id, operator } = req.body;
+  const adjustmentId = req.params.id;
+
+  const existing = db
+    .prepare("SELECT * FROM adjustments WHERE id = ?")
+    .get(adjustmentId);
+  if (!existing) {
+    return res.status(404).json({ error: "调整单不存在" });
+  }
+
+  if (existing.status !== "adjust_pending") {
+    return res.status(400).json({
+      error: "只有待调整状态才能修改配件",
+    });
+  }
+
+  if (!new_part_id) {
+    return res.status(400).json({ error: "请选择配件" });
+  }
+
+  const newPart = db
+    .prepare("SELECT * FROM parts WHERE id = ?")
+    .get(new_part_id);
+  if (!newPart) {
+    return res.status(400).json({ error: "配件不存在" });
+  }
+
+  if (newPart.category !== existing.part_category) {
+    return res.status(400).json({
+      error: `配件类别不匹配，需要${existing.part_category}类别`,
+    });
+  }
+
+  const effective = getEffectiveStock(new_part_id);
+  if (effective <= 0) {
+    return res.status(400).json({ error: "所选配件库存不足" });
+  }
+
+  let priceAdjustment = 0;
+  if (existing.original_part_id) {
+    const originalPart = db
+      .prepare("SELECT price FROM parts WHERE id = ?")
+      .get(existing.original_part_id);
+    if (originalPart) {
+      priceAdjustment = newPart.price - originalPart.price;
+    }
+  }
+
+  createAdjustmentStockReservations(adjustmentId, [new_part_id]);
+
+  db.prepare(
+    "UPDATE adjustments SET new_part_id = ?, price_adjustment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+  ).run(new_part_id, priceAdjustment, adjustmentId);
+
+  const adjustment = getAdjustmentById.get(adjustmentId);
+  res.json(formatAdjustment(adjustment));
 });
 
 app.get("/api/health", (req, res) => {

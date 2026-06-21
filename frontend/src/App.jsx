@@ -3,6 +3,7 @@ import CustomerOrderPage from "./pages/CustomerOrderPage.jsx";
 import ConsultantPage from "./pages/ConsultantPage.jsx";
 import AssemblyBoardPage from "./pages/AssemblyBoardPage.jsx";
 import OrderDetailPage from "./pages/OrderDetailPage.jsx";
+import AdjustmentDetailPage from "./pages/AdjustmentDetailPage.jsx";
 
 function App() {
   const location = useLocation();
@@ -66,6 +67,7 @@ function App() {
           <Route path="/consultant/:orderId" element={<ConsultantPage />} />
           <Route path="/assembly" element={<AssemblyBoardPage />} />
           <Route path="/orders/:id" element={<OrderDetailPage />} />
+          <Route path="/adjustments/:id" element={<AdjustmentDetailPage />} />
         </Routes>
       </main>
     </div>
